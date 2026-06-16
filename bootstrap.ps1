@@ -18,11 +18,21 @@
     $env:NO_SILENT  = '1'                    # mostra a UI dos instaladores
 #>
 $ErrorActionPreference = 'Stop'
+# TLS moderno: Win10 antigo/PS5.1 usa default fraco e o irm/download falha.
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 }
+catch { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {} }
 $base = 'https://raw.githubusercontent.com/freezerbrastem-blox/rdp-bootstrap/main'
 $tmp  = Join-Path $env:TEMP 'setup-remote.ps1'
 
 Write-Host '==> Baixando setup-remote.ps1...' -ForegroundColor Cyan
-Invoke-RestMethod "$base/setup-remote.ps1" -OutFile $tmp
+try {
+  Invoke-WebRequest "$base/setup-remote.ps1" -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+  if (-not (Test-Path $tmp) -or (Get-Item $tmp).Length -lt 100) { throw 'download vazio/curto' }
+} catch {
+  Write-Host "FALHA ao baixar setup-remote.ps1: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host "Verifique sua conexao e tente de novo." -ForegroundColor Red
+  return
+}
 
 $a = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`"")
 if ($env:CONVERT)    { $a += '-Convert' }
@@ -37,5 +47,9 @@ if ($env:TS_AUTHKEY) { $a += @('-AuthKey',   $env:TS_AUTHKEY) }
 if ($env:TS_TRUST)   { $a += @('-Trust',     $env:TS_TRUST) }
 
 Write-Host '==> Subindo elevado (aceite o UAC)...' -ForegroundColor Cyan
-Start-Process powershell -Verb RunAs -ArgumentList $a
+try { Start-Process powershell -Verb RunAs -ArgumentList $a -ErrorAction Stop }
+catch {
+  Write-Host 'UAC recusado/cancelado. Nada foi instalado. Rode de novo e clique SIM.' -ForegroundColor Red
+  return
+}
 Write-Host '==> Pronto. Acompanhe a janela elevada que abriu.' -ForegroundColor Green

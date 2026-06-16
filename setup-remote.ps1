@@ -35,6 +35,9 @@ param(
 $ErrorActionPreference = "Stop"
 function Write-Step($m) { Write-Host "`n==> $m" -ForegroundColor Cyan }
 $Silent = -not $NoSilent
+# TLS moderno: Win10 antigo/PS5.1 usa default fraco (TLS1.0) e quebra downloads HTTPS.
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13 }
+catch { try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {} }
 
 # ---- Auto-elevacao (passa todos os parametros adiante) ----
 $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -66,25 +69,36 @@ function Refresh-Path {
 
 function Winget-Install($id, $desc) {
   if (-not (Have winget)) { Write-Host "  winget ausente - pulei $id" -ForegroundColor Yellow; return }
-  if ((winget list --id $id -e 2>$null) -match [regex]::Escape($id)) {
+  if ((winget list --id $id -e --accept-source-agreements --disable-interactivity 2>$null) -match [regex]::Escape($id)) {
     Write-Host "  ja instalado: $id ($desc)"; return
   }
   Write-Host "  instalando: $id ($desc)" -ForegroundColor Yellow
-  $sil = if ($Silent) { @('--silent') } else { @() }
+  $sil = if ($Silent) { @('--silent', '--disable-interactivity') } else { @() }
   # winget ja roda o instalador em segundo plano; a maquina continua usavel.
   winget install --id $id -e --source winget --accept-source-agreements --accept-package-agreements @sil
+  if ($LASTEXITCODE -eq 3010) { Write-Host "  $id instalado, REBOOT pendente." -ForegroundColor Yellow }
 }
 
-function Npm-Global($pkg, $desc) {
-  Refresh-Path
-  $npm = (Get-Command npm -ErrorAction SilentlyContinue).Source
-  if (-not $npm) { $npm = "C:\Program Files\nodejs\npm.cmd" }
-  if (Test-Path $npm) {
-    Write-Host "  npm i -g $pkg ($desc)" -ForegroundColor Yellow
-    & $npm install -g $pkg
-  } else {
-    Write-Host "  Node/npm ausente - inclua 'node' ANTES de '$pkg' no -Order." -ForegroundColor Yellow
+# winget instala o Node de forma assincrona; o npm pode demorar a aparecer no PATH.
+# Faz polling ate 60s e cobre varios layouts de instalacao.
+function Resolve-Npm {
+  for ($i = 0; $i -lt 30; $i++) {
+    Refresh-Path
+    $n = (Get-Command npm -ErrorAction SilentlyContinue).Source
+    if (-not $n) {
+      foreach ($p in @("$env:ProgramFiles\nodejs\npm.cmd", "${env:ProgramFiles(x86)}\nodejs\npm.cmd", "$env:LOCALAPPDATA\Programs\nodejs\npm.cmd", "$env:APPDATA\npm\npm.cmd")) {
+        if (Test-Path $p) { $n = $p; break }
+      }
+    }
+    if ($n -and (Test-Path $n)) { return $n }
+    Start-Sleep -Seconds 2
   }
+  return $null
+}
+function Npm-Global($pkg, $desc) {
+  $npm = Resolve-Npm
+  if ($npm) { Write-Host "  npm i -g $pkg ($desc)" -ForegroundColor Yellow; & $npm install -g $pkg }
+  else { Write-Host "  Node/npm nao apareceu em 60s apos winget; pulei $pkg (inclua 'node' antes)." -ForegroundColor Yellow }
 }
 
 function Get-Zip($name, $url) {
@@ -143,7 +157,10 @@ function Install-SshKey($key) {
   $existing = if (Test-Path $akf) { Get-Content $akf -Raw } else { "" }
   if ($existing -notmatch [regex]::Escape($k)) { Add-Content -Path $akf -Value $k -Encoding ascii; Write-Host "  chave adicionada." }
   else { Write-Host "  chave ja instalada." }
-  icacls $akf /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
+  # ACL por SID (independe do idioma): S-1-5-32-544=Administradores, S-1-5-18=SYSTEM.
+  # Usar nomes ("Administrators") FALHA em Windows pt-BR e deixa a heranca/Usuarios
+  # autenticados, fazendo o sshd IGNORAR a chave (strict mode) -> cai pra senha.
+  icacls $akf /inheritance:r /grant "*S-1-5-32-544:F" /grant "*S-1-5-18:F" | Out-Null
 }
 
 function Ensure-SSH {
@@ -245,8 +262,13 @@ if (Have git) { Write-Host "Git ja instalado: $(git --version)" }
 else { Winget-Install 'Git.Git' 'controle de versao' }
 
 Write-Step "Habilitando Remote Desktop + NLA"
-Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
-Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name UserAuthentication -Value 1
+try { Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0 -ErrorAction Stop }
+catch { Write-Host "  RDP fDenyTSConnections falhou: $($_.Exception.Message)" -ForegroundColor Yellow }
+$rdpTcp = "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+try {
+  if (Test-Path $rdpTcp) { Set-ItemProperty $rdpTcp -Name UserAuthentication -Value 1 -ErrorAction Stop }
+  else { Write-Host "  RDP-Tcp ainda nao existe (Home/feature off) - pulando NLA." -ForegroundColor Yellow }
+} catch { Write-Host "  NLA falhou: $($_.Exception.Message)" -ForegroundColor Yellow }
 
 Write-Step "Abrindo regra de firewall do RDP"
 Enable-NetFirewallRule -Group "@FirewallAPI.dll,-28752" -ErrorAction SilentlyContinue
@@ -288,27 +310,43 @@ if (-not (Test-Path $ts)) {
 }
 Write-Step "Subindo Tailscale"
 if (Test-Path $ts) {
+  # Trust: so pergunta se houver console interativo E nao houver authkey; senao default seguro 'locked'.
   if (-not $Trust) {
-    Write-Host ""
-    Write-Host "Este dispositivo deve poder INICIAR conexoes com seus outros aparelhos?" -ForegroundColor Yellow
-    Write-Host "  [S] Sim -> confiavel    [N] Nao -> SO RECEBE conexao (recomendado)"
-    $resp = Read-Host "Permitir que ele inicie conexoes? (S/N)"
-    $Trust = if ($resp -match '^[Ss]') { "trusted" } else { "locked" }
+    if ($AuthKey -or -not [Environment]::UserInteractive) {
+      $Trust = "locked"
+      Write-Host "TS_TRUST nao informado -> assumindo 'locked' (so recebe)." -ForegroundColor Yellow
+    } else {
+      Write-Host ""
+      Write-Host "Este dispositivo deve poder INICIAR conexoes com seus outros aparelhos?" -ForegroundColor Yellow
+      Write-Host "  [S] Sim -> confiavel    [N] Nao -> SO RECEBE conexao (recomendado)"
+      $resp = Read-Host "Permitir que ele inicie conexoes? (S/N)"
+      $Trust = if ($resp -match '^[Ss]') { "trusted" } else { "locked" }
+    }
   }
   $tagArgs = @()
   if ($Trust -eq "locked") { $tagArgs = @("--advertise-tags=$LockTag"); Write-Host "Modo BLOQUEADO: $LockTag." -ForegroundColor Green }
   else { Write-Host "Modo CONFIAVEL." -ForegroundColor Green }
-  if ($AuthKey) { & $ts up --accept-routes --authkey $AuthKey @tagArgs }
-  else          { & $ts up --accept-routes @tagArgs }
-  Write-Host "IP Tailscale:" -ForegroundColor Green
-  & $ts ip -4
-}
+  $upArgs = @("--accept-routes", "--unattended")   # --unattended: tunel sobrevive a logoff (VPS)
+  if ($AuthKey) { $upArgs += @("--authkey", $AuthKey) }
+  else { Write-Host "AVISO: sem AuthKey o Tailscale abre login no navegador e NAO conclui sozinho. Gere em https://login.tailscale.com/admin/settings/keys" -ForegroundColor Yellow }
+  try {
+    $out = & $ts up @upArgs @tagArgs 2>&1; $out | Out-Host
+    if ($LASTEXITCODE -ne 0 -and ($out -match 'tag')) {
+      Write-Host "Tag nao autorizada na ACL -> subindo SEM tag (configure tagOwners no admin depois)." -ForegroundColor Yellow
+      & $ts up @upArgs
+    }
+    Write-Host "IP Tailscale:" -ForegroundColor Green
+    & $ts ip -4
+  } catch { Write-Host "  Tailscale falhou ($($_.Exception.Message)). Rode 'tailscale up' manualmente depois." -ForegroundColor Yellow }
+} else { Write-Host "  Tailscale nao instalado (winget pode ter falhado)." -ForegroundColor Yellow }
 
 # ============================ Conversao Home->Pro (UNICO reboot) ==============
 if ($isHome -and $Convert) {
-  Write-Step "Convertendo Home -> Pro (este e o UNICO passo que reinicia)"
-  Write-Host "Salve seu trabalho - o Windows vai reiniciar ao terminar." -ForegroundColor Yellow
-  Start-Process "$env:WINDIR\System32\changepk.exe" -ArgumentList "/ProductKey",$ProKey
+  Write-Step "Convertendo Home -> Pro (UNICO passo que reinicia)"
+  Write-Host "ATENCAO: o changepk abre uma JANELA que pede confirmacao e reinicia." -ForegroundColor Yellow
+  Write-Host "Salve seu trabalho. Se a janela nao aparecer, clique nela na barra de tarefas." -ForegroundColor Yellow
+  try { Start-Process "$env:WINDIR\System32\changepk.exe" -ArgumentList "/ProductKey", $ProKey -Wait }
+  catch { Write-Host "  changepk falhou: $($_.Exception.Message). Converta manual em Configuracoes > Ativacao." -ForegroundColor Yellow }
   return
 }
 
