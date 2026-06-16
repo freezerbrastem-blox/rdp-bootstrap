@@ -1,8 +1,8 @@
 <#
-  bootstrap.ps1 — instalador de uma linha do setup de acesso remoto.
+  bootstrap.ps1 Ã¢â‚¬â€ instalador de uma linha do setup de acesso remoto.
   Universal Windows 10/11. Baixa o setup-remote.ps1 e roda elevado (UAC).
 
-  Uso minimo (interativo — ele pergunta confiavel/bloqueado):
+  Uso minimo (interativo Ã¢â‚¬â€ ele pergunta confiavel/bloqueado):
     irm https://raw.githubusercontent.com/freezerbrastem-blox/rdp-bootstrap/main/bootstrap.ps1 | iex
 
   Opcoes (defina ANTES do irm, na mesma sessao):
@@ -21,6 +21,11 @@ Invoke-RestMethod "$base/setup-remote.ps1" -OutFile $tmp
 $a = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$tmp`"")
 if ($env:CONVERT)    { $a += '-Convert' }
 if ($env:NO_APPS)    { $a += '-NoApps' }
+if ($env:NO_TOOLS)   { $a += '-NoTools' }
+if ($env:NO_SILENT)  { $a += '-NoSilent' }
+if ($env:ORDER)      { $a += @('-Order',   $env:ORDER) }
+if ($env:SKIP)       { $a += @('-Skip',    $env:SKIP) }
+if ($env:VOLT_URL)   { $a += @('-VoltUrl', $env:VOLT_URL) }
 if ($env:TS_AUTHKEY) { $a += @('-AuthKey', $env:TS_AUTHKEY) }
 if ($env:TS_TRUST)   { $a += @('-Trust',   $env:TS_TRUST) }
 
