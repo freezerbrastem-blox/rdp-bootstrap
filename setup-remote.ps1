@@ -1,5 +1,5 @@
 <#
-  setup-remote.ps1 â€” Acesso remoto (RDP+SSH+Tailscale) + apps + ferramentas, W10/W11.
+  setup-remote.ps1 - Acesso remoto (RDP+SSH+Tailscale) + apps + ferramentas, W10/W11.
   Auto-eleva (UAC). Idempotente. Instalacoes SILENCIOSAS (a maquina continua usavel).
   NAO reinicia, exceto se voce passar -Convert (conversao Home->Pro).
 
@@ -65,7 +65,7 @@ function Refresh-Path {
 }
 
 function Winget-Install($id, $desc) {
-  if (-not (Have winget)) { Write-Host "  winget ausente â€” pulei $id" -ForegroundColor Yellow; return }
+  if (-not (Have winget)) { Write-Host "  winget ausente - pulei $id" -ForegroundColor Yellow; return }
   if ((winget list --id $id -e 2>$null) -match [regex]::Escape($id)) {
     Write-Host "  ja instalado: $id ($desc)"; return
   }
@@ -83,13 +83,16 @@ function Npm-Global($pkg, $desc) {
     Write-Host "  npm i -g $pkg ($desc)" -ForegroundColor Yellow
     & $npm install -g $pkg
   } else {
-    Write-Host "  Node/npm ausente â€” inclua 'node' ANTES de '$pkg' no -Order." -ForegroundColor Yellow
+    Write-Host "  Node/npm ausente - inclua 'node' ANTES de '$pkg' no -Order." -ForegroundColor Yellow
   }
 }
 
 function Get-Zip($name, $url) {
   New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
   $dest = Join-Path $ToolsDir $name
+  if ((Test-Path $dest) -and (Get-ChildItem $dest -Force -ErrorAction SilentlyContinue)) {
+    Write-Host "  ja existe: $dest (pulando, nao sobrescreve)"; return
+  }
   Write-Host "  baixando $name..." -ForegroundColor Yellow
   $zip = Join-Path $env:TEMP "$name.zip"
   Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
@@ -218,7 +221,7 @@ if ($seq) {
   if ($seq | Where-Object { $Catalog[$_].Group -eq 'tools' }) {
     New-Item -ItemType Directory -Force -Path $ToolsDir | Out-Null
     try { Add-MpPreference -ExclusionPath $ToolsDir -ErrorAction Stop; Write-Host "Defender: '$ToolsDir' excluida da verificacao." }
-    catch { Write-Host "(nao consegui excluir do Defender â€” pode apagar executores)" -ForegroundColor Yellow }
+    catch { Write-Host "(nao consegui excluir do Defender - pode apagar executores)" -ForegroundColor Yellow }
   }
   foreach ($key in $seq) {
     Write-Host "`n- $key ($($Catalog[$key].Desc))" -ForegroundColor White
@@ -256,7 +259,7 @@ if (Test-Path $ts) {
 # ============================ Conversao Home->Pro (UNICO reboot) ==============
 if ($isHome -and $Convert) {
   Write-Step "Convertendo Home -> Pro (este e o UNICO passo que reinicia)"
-  Write-Host "Salve seu trabalho â€” o Windows vai reiniciar ao terminar." -ForegroundColor Yellow
+  Write-Host "Salve seu trabalho - o Windows vai reiniciar ao terminar." -ForegroundColor Yellow
   Start-Process "$env:WINDIR\System32\changepk.exe" -ArgumentList "/ProductKey",$ProKey
   return
 }
