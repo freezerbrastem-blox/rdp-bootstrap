@@ -28,6 +28,7 @@ param(
   [switch]$NoTools,        # atalho: pula o grupo de ferramentas de Roblox
   [switch]$NoSilent,       # mostra a UI dos instaladores (padrao = silencioso)
   [string]$VoltUrl = "",   # URL FRESCA do volt.exe (presigned expira em ~15min)
+  [string]$SshPubKey = "", # sua chave PUBLICA -> login SSH sem senha
   [string]$ToolsDir = "$env:USERPROFILE\RobloxTools"
 )
 
@@ -50,6 +51,7 @@ if (-not $isAdmin) {
   if ($NoTools)  { $a += "-NoTools" }
   if ($NoSilent) { $a += "-NoSilent" }
   if ($VoltUrl)  { $a += @("-VoltUrl",$VoltUrl) }
+  if ($SshPubKey){ $a += @("-SshPubKey",$SshPubKey) }
   Start-Process powershell.exe -Verb RunAs -ArgumentList $a
   return
 }
@@ -100,27 +102,19 @@ function Get-Zip($name, $url) {
 # ============================ Catalogo de softwares ============================
 # Cada item: chave -> @{ Group; Desc; Do = scriptblock }. A ordem padrao e a ordem
 # de declaracao aqui. -Order reordena/seleciona; -Skip/-NoApps/-NoTools removem.
+# ORDEM PADRAO (escolhida): leves/rapidos -> acesso remoto -> RAM/Volt/Wave -> VS Code -> pesados.
 $Catalog = [ordered]@{
-  vscode     = @{ Group='dev';   Desc='VS Code';                 Do={ Winget-Install 'Microsoft.VisualStudioCode' 'editor' } }
-  node       = @{ Group='dev';   Desc='Node.js (p/ CLIs)';       Do={ Winget-Install 'OpenJS.NodeJS' 'runtime p/ Claude Code/Codex' } }
-  claudecode = @{ Group='dev';   Desc='Claude Code CLI';         Do={ Npm-Global '@anthropic-ai/claude-code' 'Claude Code' } }
-  codex      = @{ Group='dev';   Desc='Codex CLI';               Do={ Npm-Global '@openai/codex' 'OpenAI Codex' } }
-  mremoteng  = @{ Group='apps';  Desc='mRemoteNG';               Do={ Winget-Install 'mRemoteNG.mRemoteNG' 'multi-conexao em abas' } }
-  rdm        = @{ Group='apps';  Desc='Remote Desktop Manager';  Do={ Winget-Install 'Devolutions.RemoteDesktopManager' 'grade de sessoes' } }
+  # --- leves/rapidos ---
+  vnc        = @{ Group='apps';  Desc='TightVNC';                Do={ Winget-Install 'GlavSoft.TightVNC' 'espelha a tela sem deslogar' } }
   winscp     = @{ Group='apps';  Desc='WinSCP';                  Do={ Winget-Install 'WinSCP.WinSCP' 'transferencia de arquivos' } }
   syncthing  = @{ Group='apps';  Desc='Syncthing';               Do={ Winget-Install 'Syncthing.Syncthing' 'pasta sincronizada' } }
+  # --- acesso remoto ---
+  mremoteng  = @{ Group='apps';  Desc='mRemoteNG';               Do={ Winget-Install 'mRemoteNG.mRemoteNG' 'multi-conexao em abas' } }
   rustdesk   = @{ Group='apps';  Desc='RustDesk';                Do={ Winget-Install 'RustDesk.RustDesk' 'desktop remoto nao-atendido' } }
-  vnc        = @{ Group='apps';  Desc='TightVNC';                Do={ Winget-Install 'GlavSoft.TightVNC' 'espelha a tela sem deslogar' } }
+  rdm        = @{ Group='apps';  Desc='Remote Desktop Manager';  Do={ Winget-Install 'Devolutions.RemoteDesktopManager' 'grade de sessoes' } }
   ps7        = @{ Group='apps';  Desc='PowerShell 7';            Do={ Winget-Install 'Microsoft.PowerShell' 'Invoke-Command em massa' } }
-  roblox     = @{ Group='tools'; Desc='Roblox (oficial)';        Do={
-                   if (Have winget) {
-                     Winget-Install 'Roblox.Roblox' 'cliente oficial'
-                   } else {
-                     New-Item -ItemType Directory -Force $ToolsDir | Out-Null
-                     Invoke-WebRequest 'https://www.roblox.com/download/client' -OutFile (Join-Path $ToolsDir 'RobloxPlayerLauncher.exe') -UseBasicParsing
-                   } } }
+  # --- ferramentas de Roblox (rapidas) ---
   ram        = @{ Group='tools'; Desc='Roblox Account Manager';  Do={ Get-Zip 'RobloxAccountManager' 'https://github.com/ic3w0lf22/Roblox-Account-Manager/releases/download/3.7.2/Roblox.Account.Manager.3.7.2.zip' } }
-  wave       = @{ Group='tools'; Desc='Wave';                    Do={ Get-Zip 'Wave' 'https://getwave.gg/downloads/Wave.zip' } }
   volt       = @{ Group='tools'; Desc='Volt';                    Do={
                    if ($VoltUrl) {
                      New-Item -ItemType Directory -Force (Join-Path $ToolsDir 'Volt') | Out-Null
@@ -129,6 +123,20 @@ $Catalog = [ordered]@{
                      Write-Host "  OK: $ToolsDir\Volt\volt.exe"
                    } else {
                      Write-Host "  Volt: URL expira em 15min. Pegue fresca em https://voltbz.net/ e rode com -VoltUrl '<url>'." -ForegroundColor Yellow
+                   } } }
+  wave       = @{ Group='tools'; Desc='Wave';                    Do={ Get-Zip 'Wave' 'https://getwave.gg/downloads/Wave.zip' } }
+  # --- VS Code ---
+  vscode     = @{ Group='dev';   Desc='VS Code';                 Do={ Winget-Install 'Microsoft.VisualStudioCode' 'editor' } }
+  # --- pesados por ultimo ---
+  node       = @{ Group='dev';   Desc='Node.js (p/ CLIs)';       Do={ Winget-Install 'OpenJS.NodeJS' 'runtime p/ Claude Code/Codex' } }
+  claudecode = @{ Group='dev';   Desc='Claude Code CLI';         Do={ Npm-Global '@anthropic-ai/claude-code' 'Claude Code' } }
+  codex      = @{ Group='dev';   Desc='Codex CLI';               Do={ Npm-Global '@openai/codex' 'OpenAI Codex' } }
+  roblox     = @{ Group='tools'; Desc='Roblox (oficial)';        Do={
+                   if (Have winget) {
+                     Winget-Install 'Roblox.Roblox' 'cliente oficial'
+                   } else {
+                     New-Item -ItemType Directory -Force $ToolsDir | Out-Null
+                     Invoke-WebRequest 'https://www.roblox.com/download/client' -OutFile (Join-Path $ToolsDir 'RobloxPlayerLauncher.exe') -UseBasicParsing
                    } } }
 }
 
@@ -181,6 +189,26 @@ if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction Silentl
   New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
 }
 Write-Host "OpenSSH Server ativo na porta 22."
+
+# ---- Chave SSH (login sem senha). No Windows, admins usam administrators_authorized_keys ----
+if ($SshPubKey) {
+  Write-Step "Instalando chave SSH publica (login sem senha)"
+  $sshDir = "$env:ProgramData\ssh"
+  $akf = Join-Path $sshDir 'administrators_authorized_keys'
+  New-Item -ItemType Directory -Force $sshDir | Out-Null
+  $key = $SshPubKey.Trim()
+  $existing = if (Test-Path $akf) { Get-Content $akf -Raw } else { "" }
+  if ($existing -notmatch [regex]::Escape($key)) {
+    Add-Content -Path $akf -Value $key -Encoding ascii
+    Write-Host "Chave adicionada a $akf"
+  } else { Write-Host "Chave ja estava instalada." }
+  # ACL obrigatoria: so Administrators + SYSTEM (senao o sshd ignora o arquivo)
+  icacls $akf /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
+  Set-Service sshd -StartupType Automatic; Restart-Service sshd -ErrorAction SilentlyContinue
+  Write-Host "Login por chave habilitado (admins)."
+} else {
+  Write-Host "Sem -SshPubKey: SSH so com senha. Passe sua chave publica para login sem senha." -ForegroundColor Yellow
+}
 
 # ============================ Softwares (ordem escolhida) =====================
 $seq = Resolve-Sequence
