@@ -102,6 +102,78 @@ function Get-Zip($name, $url) {
   Write-Host "  OK: $dest"
 }
 
+# ============================ OpenSSH robusto ============================
+# Aprendizado: a capability OpenSSH.Server do Windows as vezes fica InstallPending
+# e o servico sshd nunca registra (porta 22 fechada). Aqui detectamos isso e caimos
+# para o Win32-OpenSSH PORTATIL automaticamente. Tambem habilitamos senha (o default
+# as vezes vem PasswordAuthentication=no) e instalamos a chave publica.
+
+function Install-PortableOpenSSH {
+  $dest = Join-Path $env:ProgramFiles "OpenSSH"
+  $zip  = Join-Path $env:TEMP "OpenSSH-Win64.zip"
+  $ex   = Join-Path $env:TEMP "OpenSSH-extract"
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+  Write-Host "  baixando Win32-OpenSSH portatil..." -ForegroundColor Yellow
+  Invoke-WebRequest "https://github.com/PowerShell/Win32-OpenSSH/releases/latest/download/OpenSSH-Win64.zip" -OutFile $zip -UseBasicParsing
+  if (Test-Path $ex) { Remove-Item $ex -Recurse -Force }
+  Expand-Archive $zip $ex -Force
+  $inner = Get-ChildItem $ex -Directory | Select-Object -First 1
+  New-Item -ItemType Directory -Force $dest | Out-Null
+  if (Get-Service sshd -ErrorAction SilentlyContinue) { Stop-Service sshd -Force -ErrorAction SilentlyContinue }
+  Copy-Item (Join-Path $inner.FullName "*") $dest -Recurse -Force -ErrorAction SilentlyContinue
+  Set-ExecutionPolicy Bypass -Scope Process -Force
+  & (Join-Path $dest "install-sshd.ps1")
+  & (Join-Path $dest "ssh-keygen.exe") -A 2>$null
+}
+
+function Enable-SshPassword {
+  $cfg = "$env:ProgramData\ssh\sshd_config"
+  if (-not (Test-Path $cfg)) { return }
+  $c = Get-Content $cfg
+  if ($c -match '^\s*#?\s*PasswordAuthentication') {
+    $c = $c -replace '^\s*#?\s*PasswordAuthentication\s+\w+', 'PasswordAuthentication yes'
+  } else { $c += "PasswordAuthentication yes" }
+  Set-Content $cfg $c -Encoding ascii
+}
+
+function Install-SshKey($key) {
+  $dir = "$env:ProgramData\ssh"; $akf = Join-Path $dir 'administrators_authorized_keys'
+  New-Item -ItemType Directory -Force $dir | Out-Null
+  $k = $key.Trim()
+  $existing = if (Test-Path $akf) { Get-Content $akf -Raw } else { "" }
+  if ($existing -notmatch [regex]::Escape($k)) { Add-Content -Path $akf -Value $k -Encoding ascii; Write-Host "  chave adicionada." }
+  else { Write-Host "  chave ja instalada." }
+  icacls $akf /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
+}
+
+function Ensure-SSH {
+  Write-Step "Instalando/Configurando OpenSSH Server (porta 22)"
+  # 1) tenta a capability nativa
+  try { Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction Stop | Out-Null } catch {}
+  # 2) capability pendente OU servico nao registrou -> fallback portatil
+  $cap = $null
+  try { $cap = (Get-WindowsCapability -Online -Name OpenSSH.Server* -ErrorAction SilentlyContinue).State } catch {}
+  if ((-not (Get-Service sshd -ErrorAction SilentlyContinue)) -or ($cap -eq 'InstallPending')) {
+    Write-Host "  Capability indisponivel/pendente ($cap) -> OpenSSH portatil." -ForegroundColor Yellow
+    try { Install-PortableOpenSSH } catch { Write-Host "  falha no portatil: $($_.Exception.Message)" -ForegroundColor Yellow }
+  }
+  # 3) servico Automatic + start
+  Set-Service -Name sshd -StartupType Automatic -ErrorAction SilentlyContinue
+  Start-Service sshd -ErrorAction SilentlyContinue
+  # 4) habilita senha (gotcha do default 'no') + 5) firewall + 6) chave
+  Enable-SshPassword
+  if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) {
+    New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
+  }
+  if ($SshPubKey) { Install-SshKey $SshPubKey }
+  Restart-Service sshd -ErrorAction SilentlyContinue
+  Start-Sleep 2
+  $s = Get-Service sshd -ErrorAction SilentlyContinue
+  $listen = (Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue | Measure-Object).Count
+  if ($s -and $s.Status -eq 'Running' -and $listen -gt 0) { Write-Host "OpenSSH OK: porta 22 escutando." -ForegroundColor Green }
+  else { Write-Host "OpenSSH NAO subiu (servico=$($s.Status), listen=$listen). Pode exigir reboot da capability." -ForegroundColor Yellow }
+}
+
 # ============================ Catalogo de softwares ============================
 # Cada item: chave -> @{ Group; Desc; Do = scriptblock }. A ordem padrao e a ordem
 # de declaracao aqui. -Order reordena/seleciona; -Skip/-NoApps/-NoTools removem.
@@ -184,33 +256,9 @@ $me = "$env:USERDOMAIN\$env:USERNAME"
 try { Add-LocalGroupMember -SID S-1-5-32-555 -Member $me -ErrorAction Stop; Write-Host "Adicionado: $me" }
 catch { Write-Host "Ja era membro (ou e admin): $me" }
 
-Write-Step "Instalando/Configurando OpenSSH Server (porta 22)"
-Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue | Out-Null
-Set-Service -Name sshd -StartupType Automatic -ErrorAction SilentlyContinue
-Start-Service sshd -ErrorAction SilentlyContinue
-if (-not (Get-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -ErrorAction SilentlyContinue)) {
-  New-NetFirewallRule -Name 'OpenSSH-Server-In-TCP' -DisplayName 'OpenSSH Server (sshd)' -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 | Out-Null
-}
-Write-Host "OpenSSH Server ativo na porta 22."
-
-# ---- Chave SSH (login sem senha). No Windows, admins usam administrators_authorized_keys ----
-if ($SshPubKey) {
-  Write-Step "Instalando chave SSH publica (login sem senha)"
-  $sshDir = "$env:ProgramData\ssh"
-  $akf = Join-Path $sshDir 'administrators_authorized_keys'
-  New-Item -ItemType Directory -Force $sshDir | Out-Null
-  $key = $SshPubKey.Trim()
-  $existing = if (Test-Path $akf) { Get-Content $akf -Raw } else { "" }
-  if ($existing -notmatch [regex]::Escape($key)) {
-    Add-Content -Path $akf -Value $key -Encoding ascii
-    Write-Host "Chave adicionada a $akf"
-  } else { Write-Host "Chave ja estava instalada." }
-  # ACL obrigatoria: so Administrators + SYSTEM (senao o sshd ignora o arquivo)
-  icacls $akf /inheritance:r /grant "Administrators:F" /grant "SYSTEM:F" | Out-Null
-  Set-Service sshd -StartupType Automatic; Restart-Service sshd -ErrorAction SilentlyContinue
-  Write-Host "Login por chave habilitado (admins)."
-} else {
-  Write-Host "Sem -SshPubKey: SSH so com senha. Passe sua chave publica para login sem senha." -ForegroundColor Yellow
+Ensure-SSH
+if (-not $SshPubKey) {
+  Write-Host "Sem -SshPubKey: SSH por senha (habilitada). Passe sua chave publica para login sem senha." -ForegroundColor Yellow
 }
 
 # ============================ Softwares (ordem escolhida) =====================
